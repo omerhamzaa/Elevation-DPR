@@ -732,26 +732,49 @@ if(IN_IFRAME){
   };
   window.EO_DIALOG = openDialog;
 
-  /* Console mein eoTestDialogs() chala kar tasdeeq kar sakte ho ke
-     iframe ke andar confirm/prompt ka replay theek chal raha hai. */
-  window.eoTestDialogs = function(){
-    var btn = document.createElement('button');
-    btn.style.cssText = 'position:fixed;left:-9999px';
-    btn.setAttribute('onclick', 'void 0');
-    btn.onclick = function(){
-      var a = confirm('TEST 1 of 2 — press "Yes, continue".');
-      if(!a){ alert('Test cancelled.'); btn.remove(); return; }
-      var b = prompt('TEST 2 of 2 — type: hello');
-      if(b === null){ alert('Test cancelled.'); btn.remove(); return; }
-      alert(b === 'hello'
-        ? '✅ PASS — confirm and prompt both replay correctly.\nDelete and locked-row edit will work here.'
-        : '⚠ Got "' + b + '" instead of "hello" — but the replay itself worked.');
-      btn.remove();
-    };
-    document.body.appendChild(btn);
-    btn.click();
+  /* Console mein eoTestDialogs() chala kar tasdeeq karo ke iframe ke andar
+     dialogs theek chal rahe hain. Ab ye asli delete flow ki tarah async hai:
+     pehle in-page password modal, phir confirm — yehi wo tarteeb hai jo pehle
+     toot jati thi. */
+  window.eoTestDialogs = async function(){
+    var a = await window.EO_DIALOG('prompt', 'TEST 1 of 2 — password box (jaisa delete par aata hai). Type: hello');
+    if(a === null){ window.alert('Test cancelled.'); return; }
+    var b = await window.EO_DIALOG('confirm', 'TEST 2 of 2 — press "Yes, continue".');
+    window.alert((a === 'hello' && b === true)
+      ? '✅ PASS — password dialog ke baad confirm bhi chala.\nDelete aur locked-row edit yahan kaam karenge.'
+      : '⚠ Test cancelled ya galat jawab — dialogs khud theek chal rahe hain.');
   };
 }
+
+
+/* ------------------------------- 2b. PROMISE-BASED CONFIRM / PROMPT -----------
+   Upar wala replay system SIRF sync handlers par chalta hai. Is app ke tamam
+   delete/edit handlers `async` hain (pehle in-page password modal ko await
+   karte hain), is liye replay unke saath TOOT jata tha:
+
+     • click -> async handler shuru -> await pinDialog -> handler ruk gaya
+     • user password modal ka OK dabata -> wo click Q.trigger ban jata
+     • handler wapas chalta -> confirm() -> ABORT throw -> handler chup-chaap khatam
+     • user "Yes" dabata -> replay OK button ko click karta, Delete button ko nahi
+     -> DELETE kabhi hota hi nahi, koi error bhi nahi.
+
+   Hal: replay ki zaroorat hi khatam karo. Neeche wale eoConfirm/eoPrompt
+   Promise lautate hain, aur call sites unhein `await` karte hain — is liye
+   handler ko rokne/dobara chalane ka koi kaam nahi rehta. Iframe ke bahar ye
+   native confirm/prompt hi istemal karte hain. */
+window.eoConfirm = function(msg){
+  if(window.EO_DIALOG) return window.EO_DIALOG('confirm', msg);
+  try{ return Promise.resolve(window.confirm(msg)); }catch(e){ return Promise.resolve(false); }
+};
+window.eoPrompt = function(msg, def){
+  if(window.EO_DIALOG) return window.EO_DIALOG('prompt', msg, def);
+  try{ return Promise.resolve(window.prompt(msg, def)); }catch(e){ return Promise.resolve(null); }
+};
+window.eoAlert = function(msg){
+  if(window.EO_DIALOG) return window.EO_DIALOG('alert', msg);
+  try{ window.alert(msg); }catch(e){}
+  return Promise.resolve();
+};
 
 
 /* ------------------------------------------- 3. PRINTING (sandbox-safe) */
@@ -6297,7 +6320,7 @@ $('moveMp').onclick=async()=>{
   const target=await moveDateDialog('Move man power from '+fmtMed(curDate)+' to which date?',curDate);
   if(!target||target===curDate){if(target===curDate)toast('Same date — nothing to move.');return}
   const t=day(target);
-  if(mpTotal(t)&&!confirm(fmtMed(target)+' already has man power ('+mpTotal(t)+'). Replace it with '+fmtMed(curDate)+'\'s?'))return;
+  if(mpTotal(t)&&!await eoConfirm(fmtMed(target)+' already has man power ('+mpTotal(t)+'). Replace it with '+fmtMed(curDate)+'\'s?'))return;
   t.manpower=Object.assign({},d.manpower); t.manpowerV=Object.assign({},d.manpowerV); t.mpLocked=!!d.mpLocked;
   d.manpower={}; d.manpowerV={}; d.mpLocked=false;
   save(true);renderMP();renderMpHistory();
@@ -6307,17 +6330,17 @@ $('clearMp').onclick=async()=>{
   const d=day(curDate);
   if(!mpTotal(d)){toast('No manpower recorded on '+fmtShort(curDate)+' — nothing to reset.');return}
   if(!await requireDelPass('Enter admin password to reset man power for '+fmtMed(curDate)+':'))return;
-  if(!confirm('Delete ALL manpower entries ('+mpTotal(d)+' workers) for '+fmtMed(curDate)+'?'))return;
+  if(!await eoConfirm('Delete ALL manpower entries ('+mpTotal(d)+' workers) for '+fmtMed(curDate)+'?'))return;
   d.manpower={};d.manpowerV={};d.mpLocked=false;
   save(true);renderMP();renderMpHistory();
   toast('Man power for '+fmtShort(curDate)+' reset.');
 };
-$('copyPrevMp').onclick=()=>{
+$('copyPrevMp').onclick=async()=>{
   if(day(curDate).mpLocked){toast('This day is saved/locked — click “🔒 Saved · Admin Edit” first.');return}
   const prev=reportedDates().filter(k=>k<curDate).reverse().find(k=>mpTotal(S.days[k])>0);
   if(!prev){toast('No earlier day with manpower found.');return}
   const cur=day(curDate);
-  if(mpTotal(cur)>0&&!confirm('Replace this day\'s manpower with '+fmtShort(prev)+'\'s?'))return;
+  if(mpTotal(cur)>0&&!await eoConfirm('Replace this day\'s manpower with '+fmtShort(prev)+'\'s?'))return;
   cur.manpower=Object.assign({},S.days[prev].manpower);
   save();renderMP();renderMpHistory();
   toast('Copied manpower from '+fmtShort(prev)+'.');
@@ -7541,8 +7564,8 @@ function renderUsers(){
     tr.querySelector('.uname').addEventListener('input',e=>{const v=e.target.value.trim();if(v){u.name=v;save();fillLoginUsers();if(me)applyAuthUI()}});
     tr.querySelector('.uemail').addEventListener('input',e=>{u.email=e.target.value.trim();save()});
     tr.querySelector('.urole').addEventListener('change',e=>{u.role=e.target.value;save();});
-    tr.querySelector('.urpw').onclick=()=>{
-      const np=prompt('Set a new password for '+u.name+':');
+    tr.querySelector('.urpw').onclick=async()=>{
+      const np=await eoPrompt('Set a new password for '+u.name+':');
       if(np==null)return;if(!np.trim()){toast('Password cannot be empty.');return}
       u.pass=hashPin(np.trim());save(true);toast('Password updated for '+u.name+'.');
     };
@@ -7550,7 +7573,7 @@ function renderUsers(){
     if(!me)x.onclick=async()=>{
       if((S.users||[]).filter(z=>z.role==='admin').length<=1&&u.role==='admin'){toast('At least one Admin must remain.');return}
       if(!await requireDelPass('Enter admin password to remove this user:'))return;
-      if(!confirm('Remove user '+u.name+'?'))return;
+      if(!await eoConfirm('Remove user '+u.name+'?'))return;
       S.users.splice(i,1);save(true);renderUsers();
     };
     tb.appendChild(tr);
@@ -8555,7 +8578,7 @@ async function applyBoqImport(rows,srcLabel){
   }
   if(!items.length){toast('No item rows found under the header.');return}
   if(!await requireDelPass('Enter admin password to replace the BOQ list:'))return;
-  if(!confirm('Import '+items.length+' BOQ item(s) from '+srcLabel+'?\n\nThis replaces the current BOQ list. Items with the same name keep their recorded progress.'))return;
+  if(!await eoConfirm('Import '+items.length+' BOQ item(s) from '+srcLabel+'?\n\nThis replaces the current BOQ list. Items with the same name keep their recorded progress.'))return;
   /* preserve ids so progress history stays linked. Match on NAME + SUB first —
      matching on name alone made every Material/Labour pair of the same item
      collapse onto one shared id, silently merging their Done Qty together.
@@ -8660,11 +8683,11 @@ function exportShareableApp(){
   }catch(err){console.warn(err);toast('⚠ Could not build the shareable app file.');}
 }
 $('exportAppBtn').onclick=exportShareableApp;
-$('wipeAllBtn').onclick=function(){
-  var p=prompt('\u26a0 This will permanently DELETE ALL DATA of this app in this browser (BOQ, progress, photos, bills, users).\n\nEnter the delete password to continue:');
+$('wipeAllBtn').onclick=async function(){
+  var p=await eoPrompt('\u26a0 This will permanently DELETE ALL DATA of this app in this browser (BOQ, progress, photos, bills, users).\n\nEnter the delete password to continue:');
   if(p===null) return;
   if(p!=='092929d7'){ toast('\u274c Wrong delete password \u2014 nothing was deleted.'); return; }
-  if(!confirm('Really delete ALL data? This cannot be undone.')) return;
+  if(!await eoConfirm('Really delete ALL data? This cannot be undone.')) return;
   try{ clearTimeout(saveTimer); }catch(e){}
   try{ pendingSave=null; }catch(e){}
   window.__E1_WIPED=true;
@@ -8756,7 +8779,7 @@ $('importInput').addEventListener('change',e=>{
       const d=JSON.parse(r.result);
       if(!d||typeof d!=='object'||!d.days)throw new Error('bad');
       if(!await requireDelPass('Enter admin password to replace ALL current data with this backup:'))return;
-      if(!confirm('Importing will replace ALL current data in this browser. Continue?'))return;
+      if(!await eoConfirm('Importing will replace ALL current data in this browser. Continue?'))return;
       /* Keep hold of what this browser already has: an older backup file carries no
          Work Plan (startDate / duration / planned qty) and no targets, so importing it
          raw would silently wipe the plan. With the plan gone the Work Plan, Dashboard
@@ -10652,7 +10675,7 @@ function collectForm(){
   };
 }
 
-function saveLetter(e, thenView){
+async function saveLetter(e, thenView){
   if(e) e.preventDefault();
   const f = document.getElementById('letterForm');
   if(!f.reportValidity()) return null;
@@ -10668,7 +10691,7 @@ function saveLetter(e, thenView){
   } else {
     // duplicate ref warning
     if(letters.some(l=>l.ref.toLowerCase()===data.ref.toLowerCase())){
-      if(!confirm('⚠ This Ref No already exists in the record. Save anyway?')) return null;
+      if(!await eoConfirm('⚠ This Ref No already exists in the record. Save anyway?')) return null;
     }
     id = 'L'+Math.random().toString(36).slice(2,9)+Date.now().toString(36);
     letters.unshift({id, created:new Date().toISOString(), ...data});
@@ -10681,8 +10704,8 @@ function saveLetter(e, thenView){
   return id;
 }
 
-function saveAndView(){
-  const id = saveLetter(null, true);
+async function saveAndView(){
+  const id = await saveLetter(null, true);
   if(id){ resetForm(); viewLetter(id); }
 }
 
@@ -10825,11 +10848,11 @@ function backupJSON(){
 function restoreJSON(ev){
   const file = ev.target.files[0]; if(!file) return;
   const fr = new FileReader();
-  fr.onload = () => {
+  fr.onload = async () => {
     try{
       const data = JSON.parse(fr.result);
       if(!Array.isArray(data)) throw new Error('bad');
-      if(!confirm('Restore '+data.length+' letters from backup? Current record will be replaced.')) return;
+      if(!await eoConfirm('Restore '+data.length+' letters from backup? Current record will be replaced.')) return;
       letters = data; persist(); renderSheet();
       alert('✔ Record restored — '+letters.length+' letters loaded.');
     }catch(e){ alert('Invalid backup file.'); }
@@ -11806,9 +11829,9 @@ function editRec(id){
 
 async function delRec(id){
   var r=records.find(function(x){return x.id===id}); if(!r)return;
-  var ok = window.requireEditPass ? await requireEditPass('Enter ADMIN password to DELETE '+r.ref+':') : confirm('Delete '+r.ref+'?');
+  var ok = window.requireEditPass ? await requireEditPass('Enter ADMIN password to DELETE '+r.ref+':') : await eoConfirm('Delete '+r.ref+'?');
   if(!ok)return;
-  if(!confirm('Delete '+r.ref+' — "'+(r.subject||'')+'" permanently?'))return;
+  if(!await eoConfirm('Delete '+r.ref+' — "'+(r.subject||'')+'" permanently?'))return;
   records=records.filter(function(x){return x.id!==id});
   persist(); renderSheet();
 }
@@ -11942,7 +11965,7 @@ function restore(ev){
       if(!Array.isArray(data))throw new Error('bad');
       var ok = window.requireEditPass ? await requireEditPass('Enter ADMIN password to restore SIR backup:') : true;
       if(!ok)return;
-      if(!confirm('Restore '+data.length+' instructions from backup? Current record will be replaced.'))return;
+      if(!await eoConfirm('Restore '+data.length+' instructions from backup? Current record will be replaced.'))return;
       records=data; persist(); renderSheet();
       alert('✔ Record restored — '+records.length+' instructions loaded.');
     }catch(e){ alert('Invalid backup file.'); }
